@@ -1,0 +1,14 @@
+{
+  "name": "archive-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "archive-worker.js",
+  "scripts": {
+    "start": "node archive-worker.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.8",
+    "dotenv": "^16.4.5"
+  }
+}
