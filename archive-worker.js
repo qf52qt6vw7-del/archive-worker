@@ -12,6 +12,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const BATCH_LIMIT = Number(process.env.ARCHIVE_BATCH_LIMIT || 100);
 const LOOP_SLEEP_MS = Number(process.env.ARCHIVE_LOOP_SLEEP_MS || 2000);
+const CONCURRENCY = Number(process.env.ARCHIVE_CONCURRENCY || 10);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -23,6 +24,7 @@ async function claimBatch() {
   if (error) throw new Error(`claim_send_queue_archive_batch failed: ${error.message}`);
   return data || [];
 }
+
 async function resetStale() {
   const { data, error } = await supabase.rpc("reset_stale_archive_jobs", {
     p_stale_minutes: Number(process.env.ARCHIVE_STALE_MINUTES || 10),
@@ -38,6 +40,7 @@ async function resetStale() {
     console.log("ARCHIVE_STALE_RESET", { resetCount: data });
   }
 }
+
 async function archiveOne(queueId) {
   const { error } = await supabase.rpc("archive_send_queue_row", {
     p_queue_id: queueId,
@@ -48,10 +51,34 @@ async function archiveOne(queueId) {
   }
 }
 
+// ✅ PARALLEL PROCESSOR (OUTSIDE LOOP)
+async function processBatch(rows) {
+  let index = 0;
+
+  async function worker() {
+    while (index < rows.length) {
+      const currentIndex = index++;
+      const row = rows[currentIndex];
+
+      try {
+        await archiveOne(row.queue_id);
+      } catch (err) {
+        console.error("ARCHIVE_ROW_ERROR", {
+          queueId: row.queue_id,
+          error: String(err?.message || err),
+        });
+      }
+    }
+  }
+
+  const workers = Array.from({ length: CONCURRENCY }, () => worker());
+  await Promise.all(workers);
+}
+
 async function loop() {
   while (true) {
     try {
-      await resetStale(); // 👈 ADD THIS FIRST
+      await resetStale();
 
       const rows = await claimBatch();
 
@@ -60,16 +87,9 @@ async function loop() {
         continue;
       }
 
-      for (const row of rows) {
-        try {
-          await archiveOne(row.queue_id);
-        } catch (err) {
-          console.error("ARCHIVE_ROW_ERROR", {
-            queueId: row.queue_id,
-            error: String(err?.message || err),
-          });
-        }
-      }
+      // ✅ THIS WAS MISSING
+      await processBatch(rows);
+
     } catch (err) {
       console.error("ARCHIVE_LOOP_ERROR", {
         error: String(err?.message || err),
@@ -78,6 +98,7 @@ async function loop() {
     }
   }
 }
+
 loop().catch((err) => {
   console.error("ARCHIVE_FATAL", err);
   process.exit(1);
