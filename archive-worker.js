@@ -23,7 +23,21 @@ async function claimBatch() {
   if (error) throw new Error(`claim_send_queue_archive_batch failed: ${error.message}`);
   return data || [];
 }
+async function resetStale() {
+  const { data, error } = await supabase.rpc("reset_stale_archive_jobs", {
+    p_stale_minutes: Number(process.env.ARCHIVE_STALE_MINUTES || 10),
+    p_limit: 500,
+  });
 
+  if (error) {
+    console.error("ARCHIVE_STALE_RESET_ERROR", error.message);
+    return;
+  }
+
+  if (data > 0) {
+    console.log("ARCHIVE_STALE_RESET", { resetCount: data });
+  }
+}
 async function archiveOne(queueId) {
   const { error } = await supabase.rpc("archive_send_queue_row", {
     p_queue_id: queueId,
@@ -37,6 +51,8 @@ async function archiveOne(queueId) {
 async function loop() {
   while (true) {
     try {
+      await resetStale(); // 👈 ADD THIS FIRST
+
       const rows = await claimBatch();
 
       if (!rows.length) {
@@ -62,7 +78,6 @@ async function loop() {
     }
   }
 }
-
 loop().catch((err) => {
   console.error("ARCHIVE_FATAL", err);
   process.exit(1);
