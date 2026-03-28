@@ -13,15 +13,39 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const BATCH_LIMIT = Number(process.env.ARCHIVE_BATCH_LIMIT || 100);
 const LOOP_SLEEP_MS = Number(process.env.ARCHIVE_LOOP_SLEEP_MS || 2000);
 const CONCURRENCY = Number(process.env.ARCHIVE_CONCURRENCY || 10);
+const READY_CONNECTION_LIMIT = Number(process.env.ARCHIVE_READY_CONNECTION_LIMIT || 500);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function claimBatch() {
-  const { data, error } = await supabase.rpc("claim_send_queue_archive_batch", {
-    p_limit: BATCH_LIMIT,
+async function getReadyConnectionIds() {
+  const { data, error } = await supabase.rpc("get_ready_archive_connection_ids", {
+    p_limit: READY_CONNECTION_LIMIT,
   });
 
-  if (error) throw new Error(`claim_send_queue_archive_batch failed: ${error.message}`);
+  if (error) {
+    throw new Error(`get_ready_archive_connection_ids failed: ${error.message}`);
+  }
+
+  return (data || [])
+    .map((row) => row.connection_id)
+    .filter(Boolean);
+}
+
+async function claimBatchForConnection(connectionId) {
+  const { data, error } = await supabase.rpc(
+    "claim_send_queue_archive_batch_for_connection",
+    {
+      p_connection_id: connectionId,
+      p_limit: BATCH_LIMIT,
+    }
+  );
+
+  if (error) {
+    throw new Error(
+      `claim_send_queue_archive_batch_for_connection failed for ${connectionId}: ${error.message}`
+    );
+  }
+
   return data || [];
 }
 
@@ -51,14 +75,14 @@ async function archiveOne(queueId) {
   }
 }
 
-// ✅ PARALLEL PROCESSOR (OUTSIDE LOOP)
-async function processBatch(rows) {
+async function processRows(rows) {
   let index = 0;
 
   async function worker() {
     while (index < rows.length) {
       const currentIndex = index++;
       const row = rows[currentIndex];
+      if (!row) return;
 
       try {
         await archiveOne(row.queue_id);
@@ -71,8 +95,23 @@ async function processBatch(rows) {
     }
   }
 
-  const workers = Array.from({ length: CONCURRENCY }, () => worker());
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(CONCURRENCY, rows.length)) },
+    () => worker()
+  );
+
   await Promise.all(workers);
+}
+
+async function processConnection(connectionId) {
+  const rows = await claimBatchForConnection(connectionId);
+
+  if (!rows.length) {
+    return false;
+  }
+
+  await processRows(rows);
+  return true;
 }
 
 async function loop() {
@@ -80,16 +119,23 @@ async function loop() {
     try {
       await resetStale();
 
-      const rows = await claimBatch();
+      const connectionIds = await getReadyConnectionIds();
 
-      if (!rows.length) {
+      if (!connectionIds.length) {
         await sleep(LOOP_SLEEP_MS);
         continue;
       }
 
-      // ✅ THIS WAS MISSING
-      await processBatch(rows);
+      let didWork = false;
 
+      for (const connectionId of connectionIds) {
+        const worked = await processConnection(connectionId);
+        if (worked) didWork = true;
+      }
+
+      if (!didWork) {
+        await sleep(LOOP_SLEEP_MS);
+      }
     } catch (err) {
       console.error("ARCHIVE_LOOP_ERROR", {
         error: String(err?.message || err),
