@@ -11,9 +11,10 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const BATCH_LIMIT = Number(process.env.ARCHIVE_BATCH_LIMIT || 100);
-const LOOP_SLEEP_MS = Number(process.env.ARCHIVE_LOOP_SLEEP_MS || 2000);
+const LOOP_SLEEP_MS = Number(process.env.ARCHIVE_POLL_INTERVAL_MS || 2000);
 const CONCURRENCY = Number(process.env.ARCHIVE_CONCURRENCY || 10);
 const READY_CONNECTION_LIMIT = Number(process.env.ARCHIVE_READY_CONNECTION_LIMIT || 500);
+const STALE_MINUTES = Number(process.env.ARCHIVE_STALE_PROCESSING_MINUTES || 10);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -51,7 +52,7 @@ async function claimBatchForConnection(connectionId) {
 
 async function resetStale() {
   const { data, error } = await supabase.rpc("reset_stale_archive_jobs", {
-    p_stale_minutes: Number(process.env.ARCHIVE_STALE_MINUTES || 10),
+    p_stale_minutes: STALE_MINUTES,
     p_limit: 500,
   });
 
